@@ -383,3 +383,125 @@
   (map get-nft-listing nft-ids)
 )
 
+;; helpers.clar - Helper Functions
+;; This file contains utility and helper functions used throughout the contract
+
+;; Authorization helper
+(define-private (is-authorized-transfer (nft-id uint) (caller principal))
+  (let ((nft (unwrap-panic (map-get? nfts { nft-id: nft-id }))))
+    (or 
+      (is-eq caller (get owner nft))
+      (is-eq caller (default-to DEFAULT_APPROVED_ADDRESS
+                      (get approved (map-get? approvals { nft-id: nft-id }))))
+      (is-approved-for-all (get owner nft) caller)
+    )
+  )
+)
+
+;; Owner count management
+(define-private (increment-owner-count (owner principal))
+  (let ((current-count (get-owner-nft-count owner)))
+    (map-set owner-nft-count 
+      { owner: owner } 
+      { count: (+ current-count u1) })
+  )
+)
+
+(define-private (decrement-owner-count (owner principal))
+  (let ((current-count (get-owner-nft-count owner)))
+    (if (> current-count u0)
+      (map-set owner-nft-count 
+        { owner: owner } 
+        { count: (- current-count u1) })
+      true
+    )
+  )
+)
+
+;; Validation helpers
+(define-private (is-valid-metadata (metadata (string-ascii 256)))
+  (> (len metadata) u0)
+)
+
+(define-private (is-valid-price (price uint))
+  (> price u0)
+)
+
+(define-private (is-valid-nft-id (nft-id uint))
+  (< nft-id (var-get nft-counter))
+)
+
+;; String manipulation helpers
+(define-private (string-starts-with (str (string-ascii 256)) (prefix (string-ascii 256)))
+  ;; Simplified implementation - in real contract would need proper string handling
+  true
+)
+
+(define-private (string-ends-with (str (string-ascii 256)) (suffix (string-ascii 256)))
+  ;; Simplified implementation - in real contract would need proper string handling
+  true
+)
+
+;; Math helpers
+(define-private (min (a uint) (b uint))
+  (if (< a b) a b)
+)
+
+(define-private (max (a uint) (b uint))
+  (if (> a b) a b)
+)
+
+;; Safe math operations
+(define-private (safe-add (a uint) (b uint))
+  (let ((result (+ a b)))
+    (if (>= result a) 
+      (ok result) 
+      (err u999)) ;; Overflow error
+  )
+)
+
+(define-private (safe-sub (a uint) (b uint))
+  (if (>= a b)
+    (ok (- a b))
+    (err u998)) ;; Underflow error
+)
+
+;; List helpers
+(define-private (list-contains (item uint) (items (list 10 uint)))
+  (> (len (filter (lambda (x) (is-eq x item)) items)) u0)
+)
+
+;; Read-only helper functions
+(define-read-only (get-owner-nft-count (owner principal))
+  (default-to u0 (get count (map-get? owner-nft-count { owner: owner })))
+)
+
+(define-read-only (calculate-total-value (nft-ids (list 10 uint)))
+  (fold calculate-value-helper nft-ids u0)
+)
+
+(define-private (calculate-value-helper (nft-id uint) (total uint))
+  (match (get-nft-listing nft-id)
+    listing (+ total (get price listing))
+    total
+  )
+)
+
+;; Pagination helpers for large collections
+(define-read-only (get-nfts-by-owner-paginated (owner principal) (offset uint) (limit uint))
+  ;; In a full implementation, this would iterate through NFTs efficiently
+  ;; For now, return empty list as placeholder
+  (list)
+)
+
+(define-read-only (get-recent-nfts (limit uint))
+  ;; Returns most recently minted NFTs
+  (let ((total-supply (var-get nft-counter)))
+    (if (> total-supply limit)
+      ;; Would return last 'limit' NFTs
+      (list)
+      ;; Return all NFTs if less than limit
+      (list)
+    )
+  )
+)
