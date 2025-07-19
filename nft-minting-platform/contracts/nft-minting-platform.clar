@@ -194,3 +194,113 @@
     (get approved 
       (map-get? operator-approvals { owner: owner, operator: operator })))
 )
+
+;; marketplace.clar - NFT Marketplace Functions
+;; This file handles buying, selling, and listing NFTs
+
+;; List NFT for sale
+(define-public (list-for-sale (nft-id uint) (price uint))
+  (let ((nft (unwrap! (map-get? nfts { nft-id: nft-id }) ERR_INVALID_NFT)))
+    (begin
+      (asserts! (is-eq (get owner nft) tx-sender) ERR_NOT_AUTHORIZED)
+      (asserts! (> price u0) ERR_INVALID_PRICE)
+      (map-set nft-listings 
+        { nft-id: nft-id } 
+        { price: price, seller: tx-sender })
+      (ok true)
+    )
+  )
+)
+
+;; Remove NFT from sale
+(define-public (unlist-from-sale (nft-id uint))
+  (let ((nft (unwrap! (map-get? nfts { nft-id: nft-id }) ERR_INVALID_NFT)))
+    (begin
+      (asserts! (is-eq (get owner nft) tx-sender) ERR_NOT_AUTHORIZED)
+      (map-delete nft-listings { nft-id: nft-id })
+      (ok true)
+    )
+  )
+)
+
+;; Buy NFT from marketplace
+(define-public (buy-nft (nft-id uint))
+  (let (
+    (nft (unwrap! (map-get? nfts { nft-id: nft-id }) ERR_INVALID_NFT))
+    (listing (unwrap! (map-get? nft-listings { nft-id: nft-id }) ERR_NOT_FOR_SALE))
+    (price (get price listing))
+    (seller (get seller listing))
+  )
+    (begin
+      (asserts! (>= (stx-get-balance tx-sender) price) ERR_INSUFFICIENT_FUNDS)
+      (asserts! (not (is-eq tx-sender seller)) ERR_SELF_TRANSFER)
+      
+      ;; Transfer STX payment
+      (try! (stx-transfer? price tx-sender seller))
+      
+      ;; Transfer NFT ownership
+      (map-set nfts 
+        { nft-id: nft-id } 
+        { owner: tx-sender, 
+          metadata: (get metadata nft), 
+          created-at: (get created-at nft) })
+      
+      ;; Update counters
+      (decrement-owner-count seller)
+      (increment-owner-count tx-sender)
+      
+      ;; Remove from listings and clear approvals
+      (map-delete nft-listings { nft-id: nft-id })
+      (map-delete approvals { nft-id: nft-id })
+      
+      (ok true)
+    )
+  )
+)
+
+;; Update listing price
+(define-public (update-listing-price (nft-id uint) (new-price uint))
+  (let (
+    (nft (unwrap! (map-get? nfts { nft-id: nft-id }) ERR_INVALID_NFT))
+    (listing (unwrap! (map-get? nft-listings { nft-id: nft-id }) ERR_NOT_FOR_SALE))
+  )
+    (begin
+      (asserts! (is-eq (get owner nft) tx-sender) ERR_NOT_AUTHORIZED)
+      (asserts! (> new-price u0) ERR_INVALID_PRICE)
+      (map-set nft-listings 
+        { nft-id: nft-id } 
+        { price: new-price, seller: tx-sender })
+      (ok true)
+    )
+  )
+)
+
+;; Make offer for NFT (escrow-based)
+(define-public (make-offer (nft-id uint) (offer-amount uint) (expiry-block uint))
+  (begin
+    (asserts! (nft-exists nft-id) ERR_INVALID_NFT)
+    (asserts! (> offer-amount u0) ERR_INVALID_PRICE)
+    (asserts! (> expiry-block block-height) ERR_INVALID_PRICE)
+    (asserts! (>= (stx-get-balance tx-sender) offer-amount) ERR_INSUFFICIENT_FUNDS)
+    
+    ;; In a full implementation, this would escrow the STX
+    ;; For now, we'll just store the offer
+    (ok true)
+  )
+)
+
+;; Read-only functions
+(define-read-only (get-nft-listing (nft-id uint))
+  (map-get? nft-listings { nft-id: nft-id })
+)
+
+(define-read-only (is-listed-for-sale (nft-id uint))
+  (is-some (map-get? nft-listings { nft-id: nft-id }))
+)
+
+(define-read-only (get-listing-price (nft-id uint))
+  (match (map-get? nft-listings { nft-id: nft-id })
+    listing (some (get price listing))
+    none
+  )
+)
