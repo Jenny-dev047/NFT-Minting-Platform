@@ -383,9 +383,6 @@
   (map get-nft-listing nft-ids)
 )
 
-;; helpers.clar - Helper Functions
-;; This file contains utility and helper functions used throughout the contract
-
 ;; Authorization helper
 (define-private (is-authorized-transfer (nft-id uint) (caller principal))
   (let ((nft (unwrap-panic (map-get? nfts { nft-id: nft-id }))))
@@ -504,4 +501,151 @@
       (list)
     )
   )
+)
+
+;; Transfer contract ownership
+(define-public (transfer-contract-ownership (new-owner principal))
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
+    (asserts! (not (is-eq tx-sender new-owner)) ERR_SELF_TRANSFER)
+    (var-set contract-owner new-owner)
+    (ok true)
+  )
+)
+
+;; Update NFT metadata (emergency function)
+(define-public (update-metadata (nft-id uint) (new-metadata (string-ascii 256)))
+  (let ((nft (unwrap! (map-get? nfts { nft-id: nft-id }) ERR_INVALID_NFT)))
+    (begin
+      (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
+      (asserts! (is-valid-metadata new-metadata) ERR_INVALID_NFT)
+      (map-set nfts 
+        { nft-id: nft-id } 
+        { owner: (get owner nft), 
+          metadata: new-metadata, 
+          created-at: (get created-at nft) })
+      (ok true)
+    )
+  )
+)
+
+;; Emergency pause functionality
+(define-data-var contract-paused bool false)
+
+(define-public (pause-contract)
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
+    (var-set contract-paused true)
+    (ok true)
+  )
+)
+
+(define-public (unpause-contract)
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
+    (var-set contract-paused false)
+    (ok true)
+  )
+)
+
+;; Admin mint (for airdrops, etc.)
+(define-public (admin-mint (recipient principal) (metadata (string-ascii 256)))
+  (let ((nft-id (var-get nft-counter)))
+    (begin
+      (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
+      (asserts! (not (var-get contract-paused)) ERR_NOT_AUTHORIZED)
+      (map-insert nfts 
+        { nft-id: nft-id } 
+        { owner: recipient, metadata: metadata, created-at: block-height })
+      (increment-owner-count recipient)
+      (var-set nft-counter (+ nft-id u1))
+      (ok nft-id)
+    )
+  )
+)
+
+;; Batch admin mint for airdrops
+(define-public (admin-batch-mint (recipients (list 10 { recipient: principal, metadata: (string-ascii 256) })))
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
+    (fold admin-batch-mint-helper recipients (ok (list)))
+  )
+)
+
+(define-private (admin-batch-mint-helper 
+  (mint-data { recipient: principal, metadata: (string-ascii 256) })
+  (previous-result (response (list 10 uint) uint)))
+  (match previous-result
+    success-list (match (admin-mint (get recipient mint-data) (get metadata mint-data))
+      nft-id (ok (unwrap-panic (as-max-len? (append success-list nft-id) u10)))
+      error-val (err error-val)
+    )
+    error-val (err error-val)
+  )
+)
+
+;; Force transfer (for dispute resolution)
+(define-public (admin-force-transfer (nft-id uint) (from principal) (to principal))
+  (let ((nft (unwrap! (map-get? nfts { nft-id: nft-id }) ERR_INVALID_NFT)))
+    (begin
+      (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
+      (asserts! (is-eq (get owner nft) from) ERR_NOT_AUTHORIZED)
+      (asserts! (not (is-eq from to)) ERR_SELF_TRANSFER)
+      
+      ;; Update ownership
+      (map-set nfts 
+        { nft-id: nft-id } 
+        { owner: to, 
+          metadata: (get metadata nft), 
+          created-at: (get created-at nft) })
+      
+      ;; Update counters
+      (decrement-owner-count from)
+      (increment-owner-count to)
+      
+      ;; Clear approvals and listings
+      (map-delete approvals { nft-id: nft-id })
+      (map-delete nft-listings { nft-id: nft-id })
+      
+      (ok true)
+    )
+  )
+)
+
+;; Set marketplace fee (future feature)
+(define-data-var marketplace-fee uint u250) ;; 2.5% in basis points
+
+(define-public (set-marketplace-fee (new-fee uint))
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
+    (asserts! (<= new-fee u1000) ERR_INVALID_PRICE) ;; Max 10%
+    (var-set marketplace-fee new-fee)
+    (ok true)
+  )
+)
+
+;; Withdraw accumulated fees
+(define-public (withdraw-fees (amount uint))
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
+    (asserts! (<= amount (stx-get-balance (as-contract tx-sender))) ERR_INSUFFICIENT_FUNDS)
+    (as-contract (stx-transfer? amount tx-sender (var-get contract-owner)))
+  )
+)
+
+;; Read-only admin functions
+(define-read-only (get-contract-owner)
+  (var-get contract-owner)
+)
+
+(define-read-only (is-contract-paused)
+  (var-get contract-paused)
+)
+
+(define-read-only (get-marketplace-fee)
+  (var-get marketplace-fee)
+)
+
+(define-read-only (get-contract-balance)
+  (stx-get-balance (as-contract tx-sender))
 )
