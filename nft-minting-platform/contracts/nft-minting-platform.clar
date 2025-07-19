@@ -43,3 +43,81 @@
 (define-map owner-nft-count 
   { owner: principal } 
   { count: uint })
+
+;; Core NFT functions
+(define-public (mint-nft (metadata (string-ascii 256)))
+  (let ((nft-id (var-get nft-counter)))
+    (begin
+      (map-insert nfts 
+        { nft-id: nft-id } 
+        { owner: tx-sender, metadata: metadata, created-at: block-height })
+      (increment-owner-count tx-sender)
+      (var-set nft-counter (+ nft-id u1))
+      (ok nft-id)
+    )
+  )
+)
+
+(define-public (transfer-nft (nft-id uint) (recipient principal))
+  (let ((nft (unwrap! (map-get? nfts { nft-id: nft-id }) ERR_INVALID_NFT)))
+    (begin
+      (asserts! (is-authorized-transfer nft-id tx-sender) ERR_NOT_AUTHORIZED)
+      (asserts! (not (is-eq tx-sender recipient)) ERR_SELF_TRANSFER)
+      
+      ;; Update ownership
+      (map-set nfts 
+        { nft-id: nft-id } 
+        { owner: recipient, 
+          metadata: (get metadata nft), 
+          created-at: (get created-at nft) })
+      
+      ;; Update counters
+      (decrement-owner-count (get owner nft))
+      (increment-owner-count recipient)
+      
+      ;; Clear approvals and listings
+      (map-delete approvals { nft-id: nft-id })
+      (map-delete nft-listings { nft-id: nft-id })
+      
+      (ok true)
+    )
+  )
+)
+
+(define-public (burn-nft (nft-id uint))
+  (let ((nft (unwrap! (map-get? nfts { nft-id: nft-id }) ERR_INVALID_NFT)))
+    (begin
+      (asserts! (is-eq (get owner nft) tx-sender) ERR_NOT_AUTHORIZED)
+      
+      ;; Remove NFT from storage
+      (map-delete nfts { nft-id: nft-id })
+      (map-delete approvals { nft-id: nft-id })
+      (map-delete nft-listings { nft-id: nft-id })
+      
+      ;; Update owner count
+      (decrement-owner-count tx-sender)
+      
+      (ok true)
+    )
+  )
+)
+
+;; Read-only functions
+(define-read-only (get-nft (nft-id uint))
+  (map-get? nfts { nft-id: nft-id })
+)
+
+(define-read-only (get-total-supply)
+  (var-get nft-counter)
+)
+
+(define-read-only (nft-exists (nft-id uint))
+  (is-some (map-get? nfts { nft-id: nft-id }))
+)
+
+(define-read-only (get-owner (nft-id uint))
+  (match (map-get? nfts { nft-id: nft-id })
+    nft (some (get owner nft))
+    none
+  )
+)
