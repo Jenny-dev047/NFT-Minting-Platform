@@ -121,3 +121,76 @@
     none
   )
 )
+
+;; Single NFT approval
+(define-public (approve (nft-id uint) (approved principal))
+  (let ((nft (unwrap! (map-get? nfts { nft-id: nft-id }) ERR_INVALID_NFT)))
+    (begin
+      (asserts! (is-eq (get owner nft) tx-sender) ERR_NOT_AUTHORIZED)
+      (asserts! (not (is-eq tx-sender approved)) ERR_SELF_TRANSFER)
+      (map-set approvals { nft-id: nft-id } { approved: approved })
+      (ok true)
+    )
+  )
+)
+
+;; Approve operator for all NFTs
+(define-public (set-approval-for-all (operator principal) (approved bool))
+  (begin
+    (asserts! (not (is-eq tx-sender operator)) ERR_SELF_TRANSFER)
+    (map-set operator-approvals 
+      { owner: tx-sender, operator: operator } 
+      { approved: approved })
+    (ok true)
+  )
+)
+
+;; Transfer from approved address
+(define-public (transfer-from (nft-id uint) (from principal) (to principal))
+  (let ((nft (unwrap! (map-get? nfts { nft-id: nft-id }) ERR_INVALID_NFT)))
+    (begin
+      (asserts! (is-eq (get owner nft) from) ERR_NOT_AUTHORIZED)
+      (asserts! (is-authorized-transfer nft-id tx-sender) ERR_NOT_AUTHORIZED)
+      (asserts! (not (is-eq from to)) ERR_SELF_TRANSFER)
+      
+      ;; Update ownership
+      (map-set nfts 
+        { nft-id: nft-id } 
+        { owner: to, 
+          metadata: (get metadata nft), 
+          created-at: (get created-at nft) })
+      
+      ;; Update counters
+      (decrement-owner-count from)
+      (increment-owner-count to)
+      
+      ;; Clear approvals and listings
+      (map-delete approvals { nft-id: nft-id })
+      (map-delete nft-listings { nft-id: nft-id })
+      
+      (ok true)
+    )
+  )
+)
+
+;; Clear approval for specific NFT
+(define-public (clear-approval (nft-id uint))
+  (let ((nft (unwrap! (map-get? nfts { nft-id: nft-id }) ERR_INVALID_NFT)))
+    (begin
+      (asserts! (is-eq (get owner nft) tx-sender) ERR_NOT_AUTHORIZED)
+      (map-delete approvals { nft-id: nft-id })
+      (ok true)
+    )
+  )
+)
+
+;; Read-only functions
+(define-read-only (get-approved (nft-id uint))
+  (map-get? approvals { nft-id: nft-id })
+)
+
+(define-read-only (is-approved-for-all (owner principal) (operator principal))
+  (default-to false 
+    (get approved 
+      (map-get? operator-approvals { owner: owner, operator: operator })))
+)
