@@ -1,5 +1,5 @@
-;; constants.clar - Error Constants and Configuration
-;; This file contains all error constants and configuration values
+;; NFT Minting Platform Contract
+;; A comprehensive NFT contract with minting, marketplace, and batch operations
 
 ;; Error constants
 (define-constant ERR_INVALID_NFT (err u100))
@@ -10,6 +10,8 @@
 (define-constant ERR_INVALID_PRICE (err u105))
 (define-constant ERR_NOT_FOR_SALE (err u106))
 (define-constant ERR_INSUFFICIENT_FUNDS (err u107))
+(define-constant ERR_OVERFLOW (err u999))
+(define-constant ERR_UNDERFLOW (err u998))
 
 ;; Configuration constants
 (define-constant MAX_BATCH_SIZE u10)
@@ -19,6 +21,8 @@
 ;; Data variables
 (define-data-var nft-counter uint u0)
 (define-data-var contract-owner principal tx-sender)
+(define-data-var contract-paused bool false)
+(define-data-var marketplace-fee uint u250) ;; 2.5% in basis points
 
 ;; Core NFT data
 (define-map nfts 
@@ -44,13 +48,91 @@
   { owner: principal } 
   { count: uint })
 
+;; Helper functions
+(define-private (is-authorized-transfer (nft-id uint) (caller principal))
+  (let ((nft (unwrap-panic (map-get? nfts { nft-id: nft-id }))))
+    (or 
+      (is-eq caller (get owner nft))
+      (is-eq caller (default-to DEFAULT_APPROVED_ADDRESS
+                      (get approved (map-get? approvals { nft-id: nft-id }))))
+      (is-approved-for-all (get owner nft) caller)
+    )
+  )
+)
+
+(define-private (increment-owner-count (owner principal))
+  (let ((current-count (get-owner-nft-count owner)))
+    (map-set owner-nft-count 
+      { owner: owner } 
+      { count: (+ current-count u1) })
+  )
+)
+
+(define-private (decrement-owner-count (owner principal))
+  (let ((current-count (get-owner-nft-count owner)))
+    (if (> current-count u0)
+      (map-set owner-nft-count 
+        { owner: owner } 
+        { count: (- current-count u1) })
+      true
+    )
+  )
+)
+
+(define-private (is-valid-metadata (metadata (string-ascii 256)))
+  (> (len metadata) u0)
+)
+
+(define-private (is-valid-price (price uint))
+  (> price u0)
+)
+
+(define-private (is-valid-nft-id (nft-id uint))
+  (< nft-id (var-get nft-counter))
+)
+
+;; Math helpers
+(define-private (min (a uint) (b uint))
+  (if (< a b) a b)
+)
+
+(define-private (max (a uint) (b uint))
+  (if (> a b) a b)
+)
+
+;; Safe math operations
+(define-private (safe-add (a uint) (b uint))
+  (let ((result (+ a b)))
+    (if (>= result a) 
+      (ok result) 
+      ERR_OVERFLOW)
+  )
+)
+
+(define-private (safe-sub (a uint) (b uint))
+  (if (>= a b)
+    (ok (- a b))
+    ERR_UNDERFLOW)
+)
+
+;; Fixed list helper - simplified implementation
+(define-private (list-contains (item uint) (items (list 10 uint)))
+  (fold check-item-helper items { item: item, found: false })
+)
+
+(define-private (check-item-helper (current-item uint) (acc { item: uint, found: bool }))
+  { item: (get item acc), found: (or (get found acc) (is-eq current-item (get item acc))) }
+)
+
 ;; Core NFT functions
 (define-public (mint-nft (metadata (string-ascii 256)))
   (let ((nft-id (var-get nft-counter)))
     (begin
+      (asserts! (not (var-get contract-paused)) ERR_NOT_AUTHORIZED)
+      (asserts! (is-valid-metadata metadata) ERR_INVALID_NFT)
       (map-insert nfts 
         { nft-id: nft-id } 
-        { owner: tx-sender, metadata: metadata, created-at: block-height })
+        { owner: tx-sender, metadata: metadata, created-at: stacks-block-height })
       (increment-owner-count tx-sender)
       (var-set nft-counter (+ nft-id u1))
       (ok nft-id)
@@ -61,6 +143,7 @@
 (define-public (transfer-nft (nft-id uint) (recipient principal))
   (let ((nft (unwrap! (map-get? nfts { nft-id: nft-id }) ERR_INVALID_NFT)))
     (begin
+      (asserts! (not (var-get contract-paused)) ERR_NOT_AUTHORIZED)
       (asserts! (is-authorized-transfer nft-id tx-sender) ERR_NOT_AUTHORIZED)
       (asserts! (not (is-eq tx-sender recipient)) ERR_SELF_TRANSFER)
       
@@ -87,6 +170,7 @@
 (define-public (burn-nft (nft-id uint))
   (let ((nft (unwrap! (map-get? nfts { nft-id: nft-id }) ERR_INVALID_NFT)))
     (begin
+      (asserts! (not (var-get contract-paused)) ERR_NOT_AUTHORIZED)
       (asserts! (is-eq (get owner nft) tx-sender) ERR_NOT_AUTHORIZED)
       
       ;; Remove NFT from storage
@@ -102,30 +186,11 @@
   )
 )
 
-;; Read-only functions
-(define-read-only (get-nft (nft-id uint))
-  (map-get? nfts { nft-id: nft-id })
-)
-
-(define-read-only (get-total-supply)
-  (var-get nft-counter)
-)
-
-(define-read-only (nft-exists (nft-id uint))
-  (is-some (map-get? nfts { nft-id: nft-id }))
-)
-
-(define-read-only (get-owner (nft-id uint))
-  (match (map-get? nfts { nft-id: nft-id })
-    nft (some (get owner nft))
-    none
-  )
-)
-
-;; Single NFT approval
+;; Approval functions
 (define-public (approve (nft-id uint) (approved principal))
   (let ((nft (unwrap! (map-get? nfts { nft-id: nft-id }) ERR_INVALID_NFT)))
     (begin
+      (asserts! (not (var-get contract-paused)) ERR_NOT_AUTHORIZED)
       (asserts! (is-eq (get owner nft) tx-sender) ERR_NOT_AUTHORIZED)
       (asserts! (not (is-eq tx-sender approved)) ERR_SELF_TRANSFER)
       (map-set approvals { nft-id: nft-id } { approved: approved })
@@ -134,9 +199,9 @@
   )
 )
 
-;; Approve operator for all NFTs
 (define-public (set-approval-for-all (operator principal) (approved bool))
   (begin
+    (asserts! (not (var-get contract-paused)) ERR_NOT_AUTHORIZED)
     (asserts! (not (is-eq tx-sender operator)) ERR_SELF_TRANSFER)
     (map-set operator-approvals 
       { owner: tx-sender, operator: operator } 
@@ -145,10 +210,10 @@
   )
 )
 
-;; Transfer from approved address
 (define-public (transfer-from (nft-id uint) (from principal) (to principal))
   (let ((nft (unwrap! (map-get? nfts { nft-id: nft-id }) ERR_INVALID_NFT)))
     (begin
+      (asserts! (not (var-get contract-paused)) ERR_NOT_AUTHORIZED)
       (asserts! (is-eq (get owner nft) from) ERR_NOT_AUTHORIZED)
       (asserts! (is-authorized-transfer nft-id tx-sender) ERR_NOT_AUTHORIZED)
       (asserts! (not (is-eq from to)) ERR_SELF_TRANSFER)
@@ -173,10 +238,10 @@
   )
 )
 
-;; Clear approval for specific NFT
 (define-public (clear-approval (nft-id uint))
   (let ((nft (unwrap! (map-get? nfts { nft-id: nft-id }) ERR_INVALID_NFT)))
     (begin
+      (asserts! (not (var-get contract-paused)) ERR_NOT_AUTHORIZED)
       (asserts! (is-eq (get owner nft) tx-sender) ERR_NOT_AUTHORIZED)
       (map-delete approvals { nft-id: nft-id })
       (ok true)
@@ -184,21 +249,11 @@
   )
 )
 
-;; Read-only functions
-(define-read-only (get-approved (nft-id uint))
-  (map-get? approvals { nft-id: nft-id })
-)
-
-(define-read-only (is-approved-for-all (owner principal) (operator principal))
-  (default-to false 
-    (get approved 
-      (map-get? operator-approvals { owner: owner, operator: operator })))
-)
-
-;; List NFT for sale
+;; Marketplace functions
 (define-public (list-for-sale (nft-id uint) (price uint))
   (let ((nft (unwrap! (map-get? nfts { nft-id: nft-id }) ERR_INVALID_NFT)))
     (begin
+      (asserts! (not (var-get contract-paused)) ERR_NOT_AUTHORIZED)
       (asserts! (is-eq (get owner nft) tx-sender) ERR_NOT_AUTHORIZED)
       (asserts! (> price u0) ERR_INVALID_PRICE)
       (map-set nft-listings 
@@ -209,10 +264,10 @@
   )
 )
 
-;; Remove NFT from sale
 (define-public (unlist-from-sale (nft-id uint))
   (let ((nft (unwrap! (map-get? nfts { nft-id: nft-id }) ERR_INVALID_NFT)))
     (begin
+      (asserts! (not (var-get contract-paused)) ERR_NOT_AUTHORIZED)
       (asserts! (is-eq (get owner nft) tx-sender) ERR_NOT_AUTHORIZED)
       (map-delete nft-listings { nft-id: nft-id })
       (ok true)
@@ -220,7 +275,6 @@
   )
 )
 
-;; Buy NFT from marketplace
 (define-public (buy-nft (nft-id uint))
   (let (
     (nft (unwrap! (map-get? nfts { nft-id: nft-id }) ERR_INVALID_NFT))
@@ -229,6 +283,7 @@
     (seller (get seller listing))
   )
     (begin
+      (asserts! (not (var-get contract-paused)) ERR_NOT_AUTHORIZED)
       (asserts! (>= (stx-get-balance tx-sender) price) ERR_INSUFFICIENT_FUNDS)
       (asserts! (not (is-eq tx-sender seller)) ERR_SELF_TRANSFER)
       
@@ -255,13 +310,13 @@
   )
 )
 
-;; Update listing price
 (define-public (update-listing-price (nft-id uint) (new-price uint))
   (let (
     (nft (unwrap! (map-get? nfts { nft-id: nft-id }) ERR_INVALID_NFT))
     (listing (unwrap! (map-get? nft-listings { nft-id: nft-id }) ERR_NOT_FOR_SALE))
   )
     (begin
+      (asserts! (not (var-get contract-paused)) ERR_NOT_AUTHORIZED)
       (asserts! (is-eq (get owner nft) tx-sender) ERR_NOT_AUTHORIZED)
       (asserts! (> new-price u0) ERR_INVALID_PRICE)
       (map-set nft-listings 
@@ -272,12 +327,12 @@
   )
 )
 
-;; Make offer for NFT (escrow-based)
 (define-public (make-offer (nft-id uint) (offer-amount uint) (expiry-block uint))
   (begin
+    (asserts! (not (var-get contract-paused)) ERR_NOT_AUTHORIZED)
     (asserts! (nft-exists nft-id) ERR_INVALID_NFT)
     (asserts! (> offer-amount u0) ERR_INVALID_PRICE)
-    (asserts! (> expiry-block block-height) ERR_INVALID_PRICE)
+    (asserts! (> expiry-block stacks-block-height) ERR_INVALID_PRICE)
     (asserts! (>= (stx-get-balance tx-sender) offer-amount) ERR_INSUFFICIENT_FUNDS)
     
     ;; In a full implementation, this would escrow the STX
@@ -286,50 +341,40 @@
   )
 )
 
-;; Read-only functions
-(define-read-only (get-nft-listing (nft-id uint))
-  (map-get? nft-listings { nft-id: nft-id })
-)
-
-(define-read-only (is-listed-for-sale (nft-id uint))
-  (is-some (map-get? nft-listings { nft-id: nft-id }))
-)
-
-(define-read-only (get-listing-price (nft-id uint))
-  (match (map-get? nft-listings { nft-id: nft-id })
-    listing (some (get price listing))
-    none
-  )
-)
-
-;; batch.clar - Batch Operations
-;; This file handles batch operations for multiple NFTs
-
-;; Batch transfer multiple NFTs
+;; Batch operations
 (define-public (batch-transfer (transfers (list 10 { nft-id: uint, recipient: principal })))
-  (fold batch-transfer-helper transfers (ok true))
-)
-
-;; Batch mint multiple NFTs
-(define-public (batch-mint (metadata-list (list 10 (string-ascii 256))))
-  (let ((results (fold batch-mint-helper metadata-list (list))))
-    (ok results)
+  (begin
+    (asserts! (not (var-get contract-paused)) ERR_NOT_AUTHORIZED)
+    (fold batch-transfer-helper transfers (ok true))
   )
 )
 
-;; Batch approve multiple NFTs to same address
+(define-public (batch-mint (metadata-list (list 10 (string-ascii 256))))
+  (begin
+    (asserts! (not (var-get contract-paused)) ERR_NOT_AUTHORIZED)
+    (let ((results (fold batch-mint-helper metadata-list (list))))
+      (ok results)
+    )
+  )
+)
+
 (define-public (batch-approve (nft-ids (list 10 uint)) (approved principal))
-  (fold batch-approve-helper 
-    (map create-approval-pair nft-ids (list approved approved approved approved approved approved approved approved approved approved))
-    (ok true))
+  (begin
+    (asserts! (not (var-get contract-paused)) ERR_NOT_AUTHORIZED)
+    (fold batch-approve-helper 
+      (map create-approval-pair nft-ids (list approved approved approved approved approved approved approved approved approved approved))
+      (ok true))
+  )
 )
 
-;; Batch list multiple NFTs for sale
 (define-public (batch-list (listings (list 10 { nft-id: uint, price: uint })))
-  (fold batch-list-helper listings (ok true))
+  (begin
+    (asserts! (not (var-get contract-paused)) ERR_NOT_AUTHORIZED)
+    (fold batch-list-helper listings (ok true))
+  )
 )
 
-;; Helper functions for batch operations
+;; Batch helper functions
 (define-private (batch-transfer-helper 
   (transfer-data { nft-id: uint, recipient: principal }) 
   (previous-result (response bool uint)))
@@ -370,193 +415,16 @@
   { nft-id: nft-id, approved: approved }
 )
 
-;; Batch read operations
-(define-read-only (get-multiple-nfts (nft-ids (list 10 uint)))
-  (map get-nft nft-ids)
-)
-
-(define-read-only (get-multiple-owners (nft-ids (list 10 uint)))
-  (map get-owner nft-ids)
-)
-
-(define-read-only (get-multiple-listings (nft-ids (list 10 uint)))
-  (map get-nft-listing nft-ids)
-)
-
-;; Authorization helper
-(define-private (is-authorized-transfer (nft-id uint) (caller principal))
-  (let ((nft (unwrap-panic (map-get? nfts { nft-id: nft-id }))))
-    (or 
-      (is-eq caller (get owner nft))
-      (is-eq caller (default-to DEFAULT_APPROVED_ADDRESS
-                      (get approved (map-get? approvals { nft-id: nft-id }))))
-      (is-approved-for-all (get owner nft) caller)
-    )
-  )
-)
-
-;; Owner count management
-(define-private (increment-owner-count (owner principal))
-  (let ((current-count (get-owner-nft-count owner)))
-    (map-set owner-nft-count 
-      { owner: owner } 
-      { count: (+ current-count u1) })
-  )
-)
-
-(define-private (decrement-owner-count (owner principal))
-  (let ((current-count (get-owner-nft-count owner)))
-    (if (> current-count u0)
-      (map-set owner-nft-count 
-        { owner: owner } 
-        { count: (- current-count u1) })
-      true
-    )
-  )
-)
-
-;; Validation helpers
-(define-private (is-valid-metadata (metadata (string-ascii 256)))
-  (> (len metadata) u0)
-)
-
-(define-private (is-valid-price (price uint))
-  (> price u0)
-)
-
-(define-private (is-valid-nft-id (nft-id uint))
-  (< nft-id (var-get nft-counter))
-)
-
-;; String manipulation helpers
-(define-private (string-starts-with (str (string-ascii 256)) (prefix (string-ascii 256)))
-  ;; Simplified implementation - in real contract would need proper string handling
-  true
-)
-
-(define-private (string-ends-with (str (string-ascii 256)) (suffix (string-ascii 256)))
-  ;; Simplified implementation - in real contract would need proper string handling
-  true
-)
-
-;; Math helpers
-(define-private (min (a uint) (b uint))
-  (if (< a b) a b)
-)
-
-(define-private (max (a uint) (b uint))
-  (if (> a b) a b)
-)
-
-;; Safe math operations
-(define-private (safe-add (a uint) (b uint))
-  (let ((result (+ a b)))
-    (if (>= result a) 
-      (ok result) 
-      (err u999)) ;; Overflow error
-  )
-)
-
-(define-private (safe-sub (a uint) (b uint))
-  (if (>= a b)
-    (ok (- a b))
-    (err u998)) ;; Underflow error
-)
-
-;; List helpers
-(define-private (list-contains (item uint) (items (list 10 uint)))
-  (> (len (filter (lambda (x) (is-eq x item)) items)) u0)
-)
-
-;; Read-only helper functions
-(define-read-only (get-owner-nft-count (owner principal))
-  (default-to u0 (get count (map-get? owner-nft-count { owner: owner })))
-)
-
-(define-read-only (calculate-total-value (nft-ids (list 10 uint)))
-  (fold calculate-value-helper nft-ids u0)
-)
-
-(define-private (calculate-value-helper (nft-id uint) (total uint))
-  (match (get-nft-listing nft-id)
-    listing (+ total (get price listing))
-    total
-  )
-)
-
-;; Pagination helpers for large collections
-(define-read-only (get-nfts-by-owner-paginated (owner principal) (offset uint) (limit uint))
-  ;; In a full implementation, this would iterate through NFTs efficiently
-  ;; For now, return empty list as placeholder
-  (list)
-)
-
-(define-read-only (get-recent-nfts (limit uint))
-  ;; Returns most recently minted NFTs
-  (let ((total-supply (var-get nft-counter)))
-    (if (> total-supply limit)
-      ;; Would return last 'limit' NFTs
-      (list)
-      ;; Return all NFTs if less than limit
-      (list)
-    )
-  )
-)
-
-;; Transfer contract ownership
-(define-public (transfer-contract-ownership (new-owner principal))
-  (begin
-    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
-    (asserts! (not (is-eq tx-sender new-owner)) ERR_SELF_TRANSFER)
-    (var-set contract-owner new-owner)
-    (ok true)
-  )
-)
-
-;; Update NFT metadata (emergency function)
-(define-public (update-metadata (nft-id uint) (new-metadata (string-ascii 256)))
-  (let ((nft (unwrap! (map-get? nfts { nft-id: nft-id }) ERR_INVALID_NFT)))
-    (begin
-      (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
-      (asserts! (is-valid-metadata new-metadata) ERR_INVALID_NFT)
-      (map-set nfts 
-        { nft-id: nft-id } 
-        { owner: (get owner nft), 
-          metadata: new-metadata, 
-          created-at: (get created-at nft) })
-      (ok true)
-    )
-  )
-)
-
-;; Emergency pause functionality
-(define-data-var contract-paused bool false)
-
-(define-public (pause-contract)
-  (begin
-    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
-    (var-set contract-paused true)
-    (ok true)
-  )
-)
-
-(define-public (unpause-contract)
-  (begin
-    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
-    (var-set contract-paused false)
-    (ok true)
-  )
-)
-
-;; Admin mint (for airdrops, etc.)
+;; Admin functions
 (define-public (admin-mint (recipient principal) (metadata (string-ascii 256)))
   (let ((nft-id (var-get nft-counter)))
     (begin
       (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
       (asserts! (not (var-get contract-paused)) ERR_NOT_AUTHORIZED)
+      (asserts! (is-valid-metadata metadata) ERR_INVALID_NFT)
       (map-insert nfts 
         { nft-id: nft-id } 
-        { owner: recipient, metadata: metadata, created-at: block-height })
+        { owner: recipient, metadata: metadata, created-at: stacks-block-height })
       (increment-owner-count recipient)
       (var-set nft-counter (+ nft-id u1))
       (ok nft-id)
@@ -564,10 +432,10 @@
   )
 )
 
-;; Batch admin mint for airdrops
 (define-public (admin-batch-mint (recipients (list 10 { recipient: principal, metadata: (string-ascii 256) })))
   (begin
     (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
+    (asserts! (not (var-get contract-paused)) ERR_NOT_AUTHORIZED)
     (fold admin-batch-mint-helper recipients (ok (list)))
   )
 )
@@ -584,7 +452,6 @@
   )
 )
 
-;; Force transfer (for dispute resolution)
 (define-public (admin-force-transfer (nft-id uint) (from principal) (to principal))
   (let ((nft (unwrap! (map-get? nfts { nft-id: nft-id }) ERR_INVALID_NFT)))
     (begin
@@ -612,8 +479,45 @@
   )
 )
 
-;; Set marketplace fee (future feature)
-(define-data-var marketplace-fee uint u250) ;; 2.5% in basis points
+(define-public (transfer-contract-ownership (new-owner principal))
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
+    (asserts! (not (is-eq tx-sender new-owner)) ERR_SELF_TRANSFER)
+    (var-set contract-owner new-owner)
+    (ok true)
+  )
+)
+
+(define-public (update-metadata (nft-id uint) (new-metadata (string-ascii 256)))
+  (let ((nft (unwrap! (map-get? nfts { nft-id: nft-id }) ERR_INVALID_NFT)))
+    (begin
+      (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
+      (asserts! (is-valid-metadata new-metadata) ERR_INVALID_NFT)
+      (map-set nfts 
+        { nft-id: nft-id } 
+        { owner: (get owner nft), 
+          metadata: new-metadata, 
+          created-at: (get created-at nft) })
+      (ok true)
+    )
+  )
+)
+
+(define-public (pause-contract)
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
+    (var-set contract-paused true)
+    (ok true)
+  )
+)
+
+(define-public (unpause-contract)
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
+    (var-set contract-paused false)
+    (ok true)
+  )
+)
 
 (define-public (set-marketplace-fee (new-fee uint))
   (begin
@@ -624,7 +528,6 @@
   )
 )
 
-;; Withdraw accumulated fees
 (define-public (withdraw-fees (amount uint))
   (begin
     (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
@@ -633,7 +536,78 @@
   )
 )
 
-;; Read-only admin functions
+;; Read-only functions
+(define-read-only (get-nft (nft-id uint))
+  (map-get? nfts { nft-id: nft-id })
+)
+
+(define-read-only (get-total-supply)
+  (var-get nft-counter)
+)
+
+(define-read-only (nft-exists (nft-id uint))
+  (is-some (map-get? nfts { nft-id: nft-id }))
+)
+
+(define-read-only (get-owner (nft-id uint))
+  (match (map-get? nfts { nft-id: nft-id })
+    nft (some (get owner nft))
+    none
+  )
+)
+
+(define-read-only (get-approved (nft-id uint))
+  (map-get? approvals { nft-id: nft-id })
+)
+
+(define-read-only (is-approved-for-all (owner principal) (operator principal))
+  (default-to false 
+    (get approved 
+      (map-get? operator-approvals { owner: owner, operator: operator })))
+)
+
+(define-read-only (get-nft-listing (nft-id uint))
+  (map-get? nft-listings { nft-id: nft-id })
+)
+
+(define-read-only (is-listed-for-sale (nft-id uint))
+  (is-some (map-get? nft-listings { nft-id: nft-id }))
+)
+
+(define-read-only (get-listing-price (nft-id uint))
+  (match (map-get? nft-listings { nft-id: nft-id })
+    listing (some (get price listing))
+    none
+  )
+)
+
+(define-read-only (get-owner-nft-count (owner principal))
+  (default-to u0 (get count (map-get? owner-nft-count { owner: owner })))
+)
+
+(define-read-only (get-multiple-nfts (nft-ids (list 10 uint)))
+  (map get-nft nft-ids)
+)
+
+(define-read-only (get-multiple-owners (nft-ids (list 10 uint)))
+  (map get-owner nft-ids)
+)
+
+(define-read-only (get-multiple-listings (nft-ids (list 10 uint)))
+  (map get-nft-listing nft-ids)
+)
+
+(define-read-only (calculate-total-value (nft-ids (list 10 uint)))
+  (fold calculate-value-helper nft-ids u0)
+)
+
+(define-private (calculate-value-helper (nft-id uint) (total uint))
+  (match (get-nft-listing nft-id)
+    listing (+ total (get price listing))
+    total
+  )
+)
+
 (define-read-only (get-contract-owner)
   (var-get contract-owner)
 )
@@ -648,4 +622,23 @@
 
 (define-read-only (get-contract-balance)
   (stx-get-balance (as-contract tx-sender))
+)
+
+;; Pagination helpers (simplified implementations)
+(define-read-only (get-nfts-by-owner-paginated (owner principal) (offset uint) (limit uint))
+  ;; In a full implementation, this would iterate through NFTs efficiently
+  ;; For now, return empty list as placeholder
+  (list)
+)
+
+(define-read-only (get-recent-nfts (limit uint))
+  ;; Returns most recently minted NFTs
+  (let ((total-supply (var-get nft-counter)))
+    (if (> total-supply limit)
+      ;; Would return last 'limit' NFTs
+      (list)
+      ;; Return all NFTs if less than limit
+      (list)
+    )
+  )
 )
