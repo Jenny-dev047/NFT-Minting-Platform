@@ -195,9 +195,6 @@
       (map-get? operator-approvals { owner: owner, operator: operator })))
 )
 
-;; marketplace.clar - NFT Marketplace Functions
-;; This file handles buying, selling, and listing NFTs
-
 ;; List NFT for sale
 (define-public (list-for-sale (nft-id uint) (price uint))
   (let ((nft (unwrap! (map-get? nfts { nft-id: nft-id }) ERR_INVALID_NFT)))
@@ -304,3 +301,85 @@
     none
   )
 )
+
+;; batch.clar - Batch Operations
+;; This file handles batch operations for multiple NFTs
+
+;; Batch transfer multiple NFTs
+(define-public (batch-transfer (transfers (list 10 { nft-id: uint, recipient: principal })))
+  (fold batch-transfer-helper transfers (ok true))
+)
+
+;; Batch mint multiple NFTs
+(define-public (batch-mint (metadata-list (list 10 (string-ascii 256))))
+  (let ((results (fold batch-mint-helper metadata-list (list))))
+    (ok results)
+  )
+)
+
+;; Batch approve multiple NFTs to same address
+(define-public (batch-approve (nft-ids (list 10 uint)) (approved principal))
+  (fold batch-approve-helper 
+    (map create-approval-pair nft-ids (list approved approved approved approved approved approved approved approved approved approved))
+    (ok true))
+)
+
+;; Batch list multiple NFTs for sale
+(define-public (batch-list (listings (list 10 { nft-id: uint, price: uint })))
+  (fold batch-list-helper listings (ok true))
+)
+
+;; Helper functions for batch operations
+(define-private (batch-transfer-helper 
+  (transfer-data { nft-id: uint, recipient: principal }) 
+  (previous-result (response bool uint)))
+  (match previous-result
+    success (transfer-nft (get nft-id transfer-data) (get recipient transfer-data))
+    error-value (err error-value)
+  )
+)
+
+(define-private (batch-mint-helper 
+  (metadata (string-ascii 256)) 
+  (previous-results (list 10 uint)))
+  (match (mint-nft metadata)
+    success (unwrap-panic (as-max-len? (append previous-results success) u10))
+    error-value previous-results
+  )
+)
+
+(define-private (batch-approve-helper 
+  (approval-data { nft-id: uint, approved: principal })
+  (previous-result (response bool uint)))
+  (match previous-result
+    success (approve (get nft-id approval-data) (get approved approval-data))
+    error-value (err error-value)
+  )
+)
+
+(define-private (batch-list-helper 
+  (listing-data { nft-id: uint, price: uint })
+  (previous-result (response bool uint)))
+  (match previous-result
+    success (list-for-sale (get nft-id listing-data) (get price listing-data))
+    error-value (err error-value)
+  )
+)
+
+(define-private (create-approval-pair (nft-id uint) (approved principal))
+  { nft-id: nft-id, approved: approved }
+)
+
+;; Batch read operations
+(define-read-only (get-multiple-nfts (nft-ids (list 10 uint)))
+  (map get-nft nft-ids)
+)
+
+(define-read-only (get-multiple-owners (nft-ids (list 10 uint)))
+  (map get-owner nft-ids)
+)
+
+(define-read-only (get-multiple-listings (nft-ids (list 10 uint)))
+  (map get-nft-listing nft-ids)
+)
+
